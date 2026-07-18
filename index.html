@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whisper Transcriber</title>
+<style>
+  :root {
+    --green:      #1b4d3e;
+    --green-soft: #2f6b57;
+    --blue:       #1c3f5c;
+    --blue-soft:  #35688f;
+    --ink:        #16211f;
+    --muted:      #5d6b68;
+    --rule:       #d8d5cb;
+    --paper:      #faf8f3;
+    --panel:      #fffefb;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 3rem 1.5rem 5rem;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Charter", "Palatino Linotype", Palatino,
+                 Georgia, "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1.6;
+  }
+
+  main { max-width: 46rem; margin: 0 auto; }
+
+  header { border-bottom: 1px solid var(--rule); padding-bottom: 1.25rem; margin-bottom: 2rem; }
+  h1 { font-size: 1.9rem; font-weight: 600; margin: 0; color: var(--green); letter-spacing: -0.01em; }
+  .sub { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.95rem; font-style: italic; }
+
+  #drop {
+    border: 1.5px dashed var(--blue-soft);
+    border-radius: 4px;
+    padding: 2.75rem 1.5rem;
+    text-align: center;
+    cursor: pointer;
+    background: var(--panel);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #drop:hover, #drop.over { background: #f2f7f5; border-color: var(--green); }
+  #drop strong { color: var(--blue); font-weight: 600; }
+  #drop .hint { display: block; margin-top: 0.5rem; color: var(--muted); font-size: 0.9rem; }
+
+  .job {
+    margin-top: 1.75rem;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--green);
+    border-radius: 3px;
+    padding: 1.15rem 1.35rem;
+  }
+  .job.failed { border-left-color: #9c3b2e; }
+
+  .job h2 {
+    font-size: 1.05rem; font-weight: 600; margin: 0 0 0.15rem;
+    color: var(--blue); word-break: break-word;
+  }
+  .status { color: var(--muted); font-size: 0.9rem; margin: 0; font-variant-numeric: tabular-nums; }
+
+  .bar { height: 3px; background: var(--rule); border-radius: 2px; margin-top: 0.85rem; overflow: hidden; }
+  .bar span {
+    display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--green-soft), var(--blue-soft));
+    transition: width 0.4s ease;
+  }
+
+  .text {
+    white-space: pre-wrap; word-wrap: break-word;
+    margin-top: 1.1rem; padding-top: 1.1rem;
+    border-top: 1px solid var(--rule);
+    max-height: 26rem; overflow-y: auto;
+  }
+
+  .actions { margin-top: 1.1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  button {
+    font-family: inherit; font-size: 0.88rem;
+    padding: 0.4rem 0.9rem;
+    border: 1px solid var(--blue-soft); border-radius: 3px;
+    background: transparent; color: var(--blue);
+    cursor: pointer; transition: background 0.15s, color 0.15s;
+  }
+  button:hover { background: var(--blue); color: var(--paper); }
+  button.done { border-color: var(--green); color: var(--green); }
+
+  .error { color: #9c3b2e; white-space: pre-wrap; font-size: 0.9rem; margin-top: 0.6rem; }
+  footer { margin-top: 3.5rem; color: var(--muted); font-size: 0.85rem; font-style: italic; text-align: center; }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e8e6df; --muted: #9aa6a3; --rule: #333c3a;
+      --paper: #141a19; --panel: #1a2220;
+      --green: #7fc4a8; --green-soft: #5fa98c;
+      --blue: #8fbcdb; --blue-soft: #5b8fb4;
+    }
+    #drop:hover, #drop.over { background: #1e2a28; }
+    button:hover { background: var(--blue); color: #141a19; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Whisper Transcriber</h1>
+    <p class="sub">Runs entirely on this machine. Nothing leaves your computer.</p>
+  </header>
+
+  <div id="drop">
+    <strong>Drop audio files here</strong>
+    <span class="hint">or click to choose &middot; any length, any size</span>
+  </div>
+  <input type="file" id="picker" multiple hidden>
+
+  <div id="jobs"></div>
+
+  <footer>Files are transcribed one at a time so each gets the full machine.</footer>
+</main>
+
+<script>
+const drop   = document.getElementById('drop');
+const picker = document.getElementById('picker');
+const jobsEl = document.getElementById('jobs');
+
+let queue = [];
+let busy  = false;
+
+fetch('/config').then(r => r.json()).then(cfg => {
+  picker.accept = cfg.accept.join(',');
+}).catch(() => {});
+
+drop.addEventListener('click', () => picker.click());
+picker.addEventListener('change', () => { enqueue([...picker.files]); picker.value = ''; });
+
+['dragenter', 'dragover'].forEach(evt =>
+  drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(evt =>
+  drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => enqueue([...e.dataTransfer.files]));
+
+function enqueue(files) {
+  files.forEach(file => queue.push({ file, card: makeCard(file.name) }));
+  pump();
+}
+
+function makeCard(name) {
+  const card = document.createElement('section');
+  card.className = 'job';
+  card.innerHTML = `
+    <h2></h2>
+    <p class="status">Waiting&hellip;</p>
+    <div class="bar"><span></span></div>`;
+  card.querySelector('h2').textContent = name;
+  jobsEl.appendChild(card);
+  return card;
+}
+
+async function pump() {
+  if (busy || queue.length === 0) return;
+  busy = true;
+  const item = queue.shift();
+  try {
+    await run(item);
+  } catch (err) {
+    fail(item.card, String(err));
+  }
+  busy = false;
+  pump();
+}
+
+function setStatus(card, msg)  { card.querySelector('.status').textContent = msg; }
+function setBar(card, pct)     { card.querySelector('.bar span').style.width = pct + '%'; }
+
+function fail(card, message) {
+  card.classList.add('failed');
+  setStatus(card, 'Failed');
+  card.querySelector('.bar').remove();
+  const p = document.createElement('p');
+  p.className = 'error';
+  p.textContent = message;
+  card.appendChild(p);
+}
+
+function fmtClock(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+}
+
+async function run({ file, card }) {
+  setStatus(card, 'Uploading…');
+  const res = await fetch('/upload', {
+    method: 'POST',
+    headers: { 'X-Filename': encodeURIComponent(file.name).replace(/%20/g, ' ') },
+    body: file
+  });
+  if (!res.ok) throw new Error('Upload failed (' + res.status + ')');
+  const { job } = await res.json();
+
+  const startedAt = Date.now();
+
+  while (true) {
+    await new Promise(r => setTimeout(r, 700));
+    const state = await (await fetch('/status?job=' + job)).json();
+
+    if (state.state === 'error') { fail(card, state.error || 'Unknown error'); return; }
+
+    if (state.state === 'converting') {
+      setStatus(card, 'Preparing audio…');
+    } else if (state.state === 'transcribing') {
+      const pct = state.progress || 0;
+      const elapsed = (Date.now() - startedAt) / 1000;
+      let msg = `Transcribing · ${pct}%`;
+      if (pct >= 5) {
+        msg += ` · about ${fmtClock(elapsed / (pct / 100) - elapsed)} left`;
+      }
+      setStatus(card, msg);
+      setBar(card, pct);
+    }
+
+    if (state.state === 'done') {
+      setBar(card, 100);
+      setStatus(card, `Done in ${fmtClock((Date.now() - startedAt) / 1000)}`);
+      showResult(card, file.name, state.text || '');
+      return;
+    }
+  }
+}
+
+function showResult(card, filename, text) {
+  card.querySelector('.bar').remove();
+
+  const body = document.createElement('div');
+  body.className = 'text';
+  body.textContent = text || '(no speech detected)';
+
+  const base = filename.replace(/\.[^.]+$/, '');
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+
+  const copyBtn = button('Copy', () => {
+    navigator.clipboard.writeText(text).then(() => {
+      copyBtn.textContent = 'Copied';
+      copyBtn.classList.add('done');
+      setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('done'); }, 1600);
+    });
+  });
+
+  actions.append(
+    copyBtn,
+    button('Download .md', () =>
+      save(`${base}.md`, `# ${base}\n\n${text}\n`, 'text/markdown')),
+    button('Download .txt', () =>
+      save(`${base}.txt`, text + '\n', 'text/plain'))
+  );
+
+  card.append(body, actions);
+}
+
+function button(label, onClick) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function save(name, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type: type + ';charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
