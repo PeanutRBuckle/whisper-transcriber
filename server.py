@@ -74,6 +74,18 @@ def preflight():
     return problems
 
 
+def already_ours():
+    """True if the thing holding our port is another copy of this app."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+            "http://127.0.0.1:{}/config".format(PORT), timeout=1.5
+        ) as response:
+            return "accept" in json.loads(response.read())
+    except Exception:  # noqa: BLE001 - any failure just means "not us"
+        return False
+
+
 def set_job(job_id, **fields):
     with JOBS_LOCK:
         JOBS.setdefault(job_id, {}).update(fields)
@@ -257,18 +269,26 @@ def main():
             print("  -  " + problem + "\n")
         sys.exit(1)
 
+    # Bind before printing the banner -- otherwise a failed start still tells
+    # the user to "Open: http://..." at an address that isn't listening.
+    try:
+        server = Server(("127.0.0.1", PORT), Handler)
+    except OSError as exc:
+        print("\n  Port {} is already in use.\n".format(PORT))
+        if already_ours():
+            print("  It looks like Whisper Transcriber is already running.")
+            print("  Just open:  http://127.0.0.1:{}\n".format(PORT))
+        else:
+            print("  ({})".format(exc))
+            print("  Another program has it. Start on a different port with:\n")
+            print("      PORT=8757 {}\n".format(HERE / "run.sh"))
+        sys.exit(1)
+
     url = "http://127.0.0.1:{}".format(PORT)
     print("\n  Whisper Transcriber")
     print("  Model:  {}".format(model_path().name))
     print("  Open:   {}".format(url))
     print("\n  Everything runs locally. Press Ctrl+C to stop.\n")
-
-    try:
-        server = Server(("127.0.0.1", PORT), Handler)
-    except OSError as exc:
-        print("  Could not start on port {}: {}".format(PORT, exc))
-        print("  Something else may be using it. Try:  PORT=8757 ./server.py\n")
-        sys.exit(1)
 
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
